@@ -109,6 +109,26 @@ func ContextFromExt(ext map[string]interface{}) context.Context {
 // 第二部分：全局变量和注册表
 // ============================================================
 
+// startTrackedAsyncTask centralizes async search goroutines so an embedding process can drain them.
+var asyncSearchTasks sync.WaitGroup
+
+func startTrackedAsyncTask(task func()) {
+	asyncSearchTasks.Add(1)
+	go func() { defer asyncSearchTasks.Done(); task() }()
+}
+
+// WaitForAsyncTasks waits for background plugin search and cache-refresh work to stop.
+func WaitForAsyncTasks(ctx context.Context) error {
+	done := make(chan struct{})
+	go func() { asyncSearchTasks.Wait(); close(done) }()
+	select {
+	case <-done:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
 // 全局异步插件注册表
 var (
 	globalRegistry     = make(map[string]AsyncSearchPlugin)
@@ -671,7 +691,9 @@ func (p *BaseAsyncPlugin) AsyncSearch(
 
 				// 如果缓存接近过期（已用时间超过TTL的80%），在后台刷新缓存
 				if time.Since(cachedResult.Timestamp) > (p.getCacheTTL() * 4 / 5) {
-					go p.refreshCacheInBackground(keyword, pluginSpecificCacheKey, searchFunc, cachedResult, mainCacheKey, ext)
+					startTrackedAsyncTask(func() {
+						p.refreshCacheInBackground(keyword, pluginSpecificCacheKey, searchFunc, cachedResult, mainCacheKey, ext)
+					})
 				}
 
 				return cachedResult.Results, nil
@@ -685,7 +707,9 @@ func (p *BaseAsyncPlugin) AsyncSearch(
 				// 标记为部分过期
 				if time.Since(cachedResult.Timestamp) >= p.getCacheTTL() {
 					// 在后台刷新缓存
-					go p.refreshCacheInBackground(keyword, pluginSpecificCacheKey, searchFunc, cachedResult, mainCacheKey, ext)
+					startTrackedAsyncTask(func() {
+						p.refreshCacheInBackground(keyword, pluginSpecificCacheKey, searchFunc, cachedResult, mainCacheKey, ext)
+					})
 
 					// 日志记录
 					fmt.Printf("[%s] 缓存已过期，后台刷新中: %s (已过期: %v)\n",
@@ -705,7 +729,7 @@ func (p *BaseAsyncPlugin) AsyncSearch(
 	doneChan := make(chan struct{})
 
 	// 启动后台处理
-	go func() {
+	startTrackedAsyncTask(func() {
 		// 尝试获取工作槽
 		if !acquireWorkerSlot() {
 			// 工作池已满，使用快速响应客户端直接处理
@@ -848,7 +872,7 @@ func (p *BaseAsyncPlugin) AsyncSearch(
 				// 异步插件本地缓存系统已移除
 			}
 		}
-	}()
+	})
 
 	// 获取响应超时时间
 	responseTimeout := defaultAsyncResponseTimeout
@@ -957,7 +981,9 @@ func (p *BaseAsyncPlugin) AsyncSearchWithResult(
 
 				// 如果缓存接近过期（已用时间超过TTL的80%），在后台刷新缓存
 				if time.Since(cachedResult.Timestamp) > (p.getCacheTTL() * 4 / 5) {
-					go p.refreshCacheInBackground(keyword, pluginSpecificCacheKey, searchFunc, cachedResult, mainCacheKey, ext)
+					startTrackedAsyncTask(func() {
+						p.refreshCacheInBackground(keyword, pluginSpecificCacheKey, searchFunc, cachedResult, mainCacheKey, ext)
+					})
 				}
 
 				return model.PluginSearchResult{
@@ -977,7 +1003,9 @@ func (p *BaseAsyncPlugin) AsyncSearchWithResult(
 				// 标记为部分过期
 				if time.Since(cachedResult.Timestamp) >= p.getCacheTTL() {
 					// 在后台刷新缓存
-					go p.refreshCacheInBackground(keyword, pluginSpecificCacheKey, searchFunc, cachedResult, mainCacheKey, ext)
+					startTrackedAsyncTask(func() {
+						p.refreshCacheInBackground(keyword, pluginSpecificCacheKey, searchFunc, cachedResult, mainCacheKey, ext)
+					})
 				}
 
 				return model.PluginSearchResult{
@@ -999,7 +1027,7 @@ func (p *BaseAsyncPlugin) AsyncSearchWithResult(
 	doneChan := make(chan struct{})
 
 	// 启动后台处理
-	go func() {
+	startTrackedAsyncTask(func() {
 		defer func() {
 			select {
 			case <-doneChan:
@@ -1041,7 +1069,7 @@ func (p *BaseAsyncPlugin) AsyncSearchWithResult(
 			default:
 			}
 		}
-	}()
+	})
 
 	// 等待结果或超时
 	responseTimeout := defaultAsyncResponseTimeout
@@ -1056,7 +1084,9 @@ func (p *BaseAsyncPlugin) AsyncSearchWithResult(
 	// 超时或调用方取消：返回空结果，后台继续处理并填充缓存
 	pending := func() model.PluginSearchResult {
 		// 🔥 超时处理：返回空结果，后台继续处理
-		go p.completeSearchInBackground(keyword, searchFunc, pluginSpecificCacheKey, mainCacheKey, doneChan, ext)
+		startTrackedAsyncTask(func() {
+			p.completeSearchInBackground(keyword, searchFunc, pluginSpecificCacheKey, mainCacheKey, doneChan, ext)
+		})
 
 		// 存储临时缓存（标记为不完整）
 		apiResponseCache.Store(pluginSpecificCacheKey, cachedResponse{

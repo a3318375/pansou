@@ -15,10 +15,13 @@ import (
 
 // 全局清理任务相关变量（单例模式）
 var (
-	globalCleanupTicker *time.Ticker
-	globalCleanupOnce   sync.Once
-	registeredCaches    []cleanupTarget
-	cacheRegistryMutex  sync.RWMutex
+	globalCleanupTicker   *time.Ticker
+	globalCleanupOnce     sync.Once
+	globalCleanupStop     chan struct{}
+	globalCleanupDone     chan struct{}
+	globalCleanupStopOnce sync.Once
+	registeredCaches      []cleanupTarget
+	cacheRegistryMutex    sync.RWMutex
 )
 
 // 清理目标接口
@@ -309,19 +312,37 @@ func (c *ShardedMemoryCache) Clear() {
 func startGlobalCleanupTask() {
 	globalCleanupOnce.Do(func() {
 		globalCleanupTicker = time.NewTicker(5 * time.Minute)
+		globalCleanupStop = make(chan struct{})
+		globalCleanupDone = make(chan struct{})
 		go func() {
-			for range globalCleanupTicker.C {
-				cacheRegistryMutex.RLock()
-				caches := make([]cleanupTarget, len(registeredCaches))
-				copy(caches, registeredCaches)
-				cacheRegistryMutex.RUnlock()
-
-				// 并行清理所有注册的缓存
-				for _, cache := range caches {
-					go cache.CleanExpired()
+			defer close(globalCleanupDone)
+			for {
+				select {
+				case <-globalCleanupStop:
+					return
+				case <-globalCleanupTicker.C:
+					cacheRegistryMutex.RLock()
+					caches := make([]cleanupTarget, len(registeredCaches))
+					copy(caches, registeredCaches)
+					cacheRegistryMutex.RUnlock()
+					for _, cache := range caches {
+						go cache.CleanExpired()
+					}
 				}
 			}
 		}()
+	})
+}
+
+// StopGlobalCleanupTask stops the process-wide cache cleanup loop during graceful shutdown.
+func StopGlobalCleanupTask() {
+	if globalCleanupStop == nil {
+		return
+	}
+	globalCleanupStopOnce.Do(func() {
+		globalCleanupTicker.Stop()
+		close(globalCleanupStop)
+		<-globalCleanupDone
 	})
 }
 
