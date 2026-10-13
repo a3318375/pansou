@@ -64,11 +64,16 @@ type CheckService struct {
 }
 
 func NewCheckService() *CheckService {
+	return NewCheckServiceWithCachePath(filepath.Join(".", "cache", "check_cache.db"))
+}
+
+// NewCheckServiceWithCachePath lets an embedding application own persistent storage.
+func NewCheckServiceWithCachePath(cacheFile string) *CheckService {
 	service := &CheckService{
 		cache:     make(map[string]cachedCheckResult),
 		inflight:  make(map[string]*activeCheckCall),
 		client:    util.GetHTTPClient(),
-		cacheFile: filepath.Join(".", "cache", "check_cache.db"),
+		cacheFile: cacheFile,
 	}
 	service.openCacheStore()
 	service.pruneExpiredCacheStore()
@@ -1586,3 +1591,11 @@ var (
 	check_serviceRe2 = regexp.MustCompile(`（访问码[：:]\s*([a-zA-Z0-9]+)）`)
 	check_serviceRe3 = regexp.MustCompile(`pan\.xunlei\.com/s/([^?/#]+)`)
 )
+
+// Close releases the persistent check cache after active checks have drained.
+func (s *CheckService) Close() error {
+	if s.cacheDB == nil {
+		return nil
+	}
+	return s.cacheDB.Close()
+}
